@@ -49,6 +49,44 @@ class TestTodoListByCategory:
         assert items == []
 
 
+class TestTodoListCRUD:
+    """TodoListのCRUD操作テスト（正常系3ケース、異常系2ケース）"""
+
+    def setup_method(self):
+        self.todo = TodoList()
+
+    # --- 正常系 ---
+    def test_正常_アイテムを追加してlist_allで全件取得できる(self):
+        self.todo.add("タスクA")
+        self.todo.add("タスクB")
+        items = self.todo.list_all()
+        assert len(items) == 2
+        assert items[0].title == "タスクA"
+        assert items[1].title == "タスクB"
+
+    def test_正常_存在するIDのTodoをcompleteで完了にできる(self):
+        item = self.todo.add("レポート提出")
+        result = self.todo.complete(item.id)
+        assert result is not None
+        assert result.done is True
+        assert result.id == item.id
+
+    def test_正常_存在するIDのTodoをdeleteで削除できる(self):
+        item = self.todo.add("削除するタスク")
+        deleted = self.todo.delete(item.id)
+        assert deleted is True
+        assert len(self.todo.list_all()) == 0
+
+    # --- 異常系 ---
+    def test_異常_存在しないIDをcompleteするとNoneを返す(self):
+        result = self.todo.complete(999)
+        assert result is None
+
+    def test_異常_存在しないIDをdeleteするとFalseを返す(self):
+        result = self.todo.delete(999)
+        assert result is False
+
+
 class TestTodoListStr:
     def test_カテゴリが文字列に含まれる(self):
         todo = TodoList()
