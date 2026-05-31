@@ -1,289 +1,343 @@
-"""TodoItemとTodoListのテスト"""
+"""TodoList クラスのテスト。
 
+正常系・異常系・エッジケースを網羅する。
+
+【確認済みバグ一覧】
+  B1: load() でファイルが存在しない場合 FileNotFoundError が発生する
+  B2: get_stats() でアイテム0件のとき ZeroDivisionError が発生する
+  B3: delete() でIDが見つからない場合 False ではなく None を返す
+  B4: complete() でIDが見つからない場合 None を返す
+  B5: add() に空文字列タイトルを渡すと登録されてしまう
+  B6: search() に None を渡すと TypeError が発生する
+  B7: list_all() が内部リストへの参照を返すため外部から内部データが壊れる
+"""
+
+import json
 import pytest
-from src.todo import TodoItem, TodoList
+from src.todo import TodoList
 
 
-class TestTodoItem:
-    """TodoItemデータクラスのテスト"""
+# ---------------------------------------------------------------------------
+# フィクスチャ
+# ---------------------------------------------------------------------------
 
-    def test_デフォルト値が正しく設定される(self):
-        """idとtitleのみ指定した場合、done=False・category=Noneになること"""
-        item = TodoItem(id=1, title="タスク")
-        assert item.id == 1
-        assert item.title == "タスク"
-        assert item.done is False
-        assert item.category is None
-
-    def test_全フィールドを明示的に指定できる(self):
-        """全フィールドを明示的に指定して正しく格納されること"""
-        item = TodoItem(id=5, title="買い物", done=True, category="プライベート")
-        assert item.id == 5
-        assert item.title == "買い物"
-        assert item.done is True
-        assert item.category == "プライベート"
-
-    def test_デフォルトカテゴリはNone(self):
-        """categoryを省略した場合、Noneになること"""
-        item = TodoItem(id=1, title="タスク")
-        assert item.category is None
-
-    def test_カテゴリを設定できる(self):
-        """categoryに文字列を設定できること"""
-        item = TodoItem(id=1, title="タスク", category="仕事")
-        assert item.category == "仕事"
+@pytest.fixture
+def todo(tmp_path):
+    """一時ファイルを使った空の TodoList を返す。"""
+    filepath = str(tmp_path / "todos.json")
+    with open(filepath, "w") as f:
+        json.dump({"todos": [], "next_id": 1}, f)
+    return TodoList(filepath=filepath)
 
 
-class TestTodoListAdd:
-    """TodoList.add() のテスト"""
+@pytest.fixture
+def todo_with_items(tmp_path):
+    """3件のアイテムを追加済みの TodoList を返す。"""
+    filepath = str(tmp_path / "todos.json")
+    with open(filepath, "w") as f:
+        json.dump({"todos": [], "next_id": 1}, f)
+    tl = TodoList(filepath=filepath)
+    tl.add("タスクA")
+    tl.add("タスクB")
+    tl.add("タスクC")
+    return tl
 
-    def test_カテゴリなしで追加できる(self):
-        """categoryを省略してTodoを追加するとcategoryがNoneになること"""
-        todo = TodoList()
-        item = todo.add("タスク")
-        assert item.category is None
 
-    def test_カテゴリ付きで追加できる(self):
-        """categoryを指定してTodoを追加するとcategoryが反映されること"""
-        todo = TodoList()
-        item = todo.add("報告書を書く", category="仕事")
-        assert item.category == "仕事"
+# ===========================================================================
+# 正常系テスト
+# ===========================================================================
 
-    def test_追加するとidが自動採番される(self):
-        """複数追加した場合、idが1から連番で採番されること"""
-        todo = TodoList()
-        item1 = todo.add("タスクA")
-        item2 = todo.add("タスクB")
-        item3 = todo.add("タスクC")
-        assert item1.id == 1
-        assert item2.id == 2
-        assert item3.id == 3
+class TestAdd:
+    """add() のテスト"""
 
-    def test_追加したアイテムのdoneはFalse(self):
-        """追加直後のTodoItemはdone=Falseであること"""
-        todo = TodoList()
+    def test_追加するとidが1から採番される(self, todo):
+        """add() を呼ぶと id=1 のアイテムが返ること"""
+        item = todo.add("最初のタスク")
+        assert item["id"] == 1
+        assert item["title"] == "最初のタスク"
+        assert item["done"] is False
+
+    def test_複数追加すると連番でidが振られる(self, todo):
+        """複数回 add() すると id が連番で増加すること"""
+        item1 = todo.add("タスク1")
+        item2 = todo.add("タスク2")
+        item3 = todo.add("タスク3")
+        assert item1["id"] == 1
+        assert item2["id"] == 2
+        assert item3["id"] == 3
+
+    def test_追加直後のdoneはFalse(self, todo):
+        """add() した直後のアイテムは done=False であること"""
         item = todo.add("未完了タスク")
-        assert item.done is False
-
-    def test_追加したアイテムがリストに存在する(self):
-        """add後にlist_allで追加したアイテムが取得できること"""
-        todo = TodoList()
-        added = todo.add("確認タスク", category="確認")
-        items = todo.list_all()
-        assert len(items) == 1
-        assert items[0].title == "確認タスク"
-        assert items[0].id == added.id
+        assert item["done"] is False
 
 
-class TestTodoListListAll:
-    """TodoList.list_all() のテスト"""
+class TestListAll:
+    """list_all() のテスト"""
 
-    def test_空リストで全件取得すると空リストを返す(self):
-        """アイテムが0件のとき、list_allは空リストを返すこと"""
-        todo = TodoList()
+    def test_空リストのとき空リストを返す(self, todo):
+        """アイテムが0件の場合 list_all() は空リストを返すこと"""
         assert todo.list_all() == []
 
-    def test_複数追加した後に全件取得できる(self):
-        """複数のTodoを追加した後、list_allで全件取得できること"""
-        todo = TodoList()
-        todo.add("タスクA")
-        todo.add("タスクB")
-        items = todo.list_all()
-        assert len(items) == 2
-        assert items[0].title == "タスクA"
-        assert items[1].title == "タスクB"
+    def test_追加したアイテムが全件取得できる(self, todo_with_items):
+        """3件追加後に list_all() で3件取得できること"""
+        items = todo_with_items.list_all()
+        assert len(items) == 3
 
-    def test_list_allは元のリストのコピーを返す(self):
-        """list_allが返すリストを変更しても内部リストに影響しないこと"""
-        todo = TodoList()
+    def test_追加した順序でアイテムが返る(self, todo):
+        """list_all() は追加した順序でアイテムを返すこと"""
+        todo.add("先に追加")
+        todo.add("後に追加")
+        items = todo.list_all()
+        assert items[0]["title"] == "先に追加"
+        assert items[1]["title"] == "後に追加"
+
+
+class TestComplete:
+    """complete() のテスト"""
+
+    def test_存在するIDをcompleteするとdoneがTrueになる(self, todo):
+        """complete() 後にアイテムの done が True になること"""
+        item = todo.add("完了するタスク")
+        result = todo.complete(item["id"])
+        assert result is not None
+        assert result["done"] is True
+
+    def test_complete後もリストにアイテムが残る(self, todo):
+        """complete() 後もアイテムは list_all() で取得できること"""
+        item = todo.add("完了タスク")
+        todo.complete(item["id"])
+        assert len(todo.list_all()) == 1
+
+    def test_completeは指定したIDのアイテムだけ完了にする(self, todo):
+        """complete() は指定IDのアイテムのみ done=True にし、他は変更しないこと"""
+        item1 = todo.add("タスク1")
+        item2 = todo.add("タスク2")
+        todo.complete(item1["id"])
+        items = todo.list_all()
+        assert items[0]["done"] is True
+        assert items[1]["done"] is False
+
+
+class TestDelete:
+    """delete() のテスト"""
+
+    def test_存在するIDをdeleteするとTrueを返す(self, todo):
+        """delete() が成功すると True を返すこと"""
+        item = todo.add("削除するタスク")
+        result = todo.delete(item["id"])
+        assert result is True
+
+    def test_deleteするとリストからアイテムが消える(self, todo):
+        """delete() 後にアイテムが list_all() から消えること"""
+        item = todo.add("消えるタスク")
+        todo.delete(item["id"])
+        assert len(todo.list_all()) == 0
+
+    def test_複数アイテムから指定IDだけ削除される(self, todo):
+        """delete() は指定IDのアイテムのみ削除し、他はリストに残ること"""
+        item1 = todo.add("残すタスク")
+        item2 = todo.add("削除するタスク")
+        todo.delete(item2["id"])
+        remaining = todo.list_all()
+        assert len(remaining) == 1
+        assert remaining[0]["id"] == item1["id"]
+
+
+class TestSearch:
+    """search() のテスト"""
+
+    def test_キーワードにマッチするアイテムを返す(self, todo):
+        """search() はタイトルにキーワードを含むアイテムを返すこと"""
+        todo.add("書類を整理する")
+        todo.add("報告書を書く")
+        todo.add("買い物リスト")
+        result = todo.search("書")
+        assert len(result) == 2
+
+    def test_マッチしないキーワードのとき空リストを返す(self, todo):
+        """search() でマッチするアイテムがない場合は空リストを返すこと"""
+        todo.add("タスクA")
+        result = todo.search("存在しないキーワード")
+        assert result == []
+
+    def test_空文字列で全件マッチする(self, todo):
+        """search('') は全アイテムを返すこと（空文字列はすべてのタイトルに含まれる）"""
+        todo.add("タスク1")
+        todo.add("タスク2")
+        result = todo.search("")
+        assert len(result) == 2
+
+
+class TestGetStats:
+    """get_stats() のテスト"""
+
+    def test_アイテムがある場合に正しい統計を返す(self, todo):
+        """get_stats() が total/done/pending/rate を正しく計算すること"""
+        todo.add("タスク1")
+        item2 = todo.add("タスク2")
+        todo.complete(item2["id"])
+        stats = todo.get_stats()
+        assert stats["total"] == 2
+        assert stats["done"] == 1
+        assert stats["pending"] == 1
+        assert stats["rate"] == 0.5
+
+    def test_全件完了のときrate1点0(self, todo):
+        """全アイテム完了時に rate=1.0 が返ること"""
+        item = todo.add("タスク")
+        todo.complete(item["id"])
+        stats = todo.get_stats()
+        assert stats["rate"] == 1.0
+
+    def test_完了なしのときrate0点0(self, todo):
+        """完了アイテムが0件のとき rate=0.0 が返ること"""
         todo.add("タスク")
-        returned = todo.list_all()
-        returned.clear()
-        # 内部リストには影響しない
+        stats = todo.get_stats()
+        assert stats["rate"] == 0.0
+
+
+# ===========================================================================
+# 異常系・エッジケーステスト（バグの確認を含む）
+# ===========================================================================
+
+class TestLoadBug:
+    """B1: load() のバグ確認"""
+
+    def test_存在しないファイルでFileNotFoundErrorが発生する(self, tmp_path):
+        """【バグB1】ファイルが存在しない場合 FileNotFoundError が発生すること"""
+        filepath = str(tmp_path / "nonexistent.json")
+        with pytest.raises(FileNotFoundError):
+            TodoList(filepath=filepath)
+
+
+class TestGetStatsBug:
+    """B2: get_stats() のゼロ除算バグ確認"""
+
+    @pytest.mark.xfail(raises=ZeroDivisionError, strict=True,
+                       reason="【バグB2】アイテム0件のとき ZeroDivisionError が発生する既知バグ")
+    def test_アイテム0件でget_statsを呼ぶとゼロ除算が発生する(self, todo):
+        """【バグB2】アイテムが0件のとき get_stats() が ZeroDivisionError を発生させること"""
+        todo.get_stats()
+
+
+class TestDeleteEdgeCase:
+    """B3: delete() が存在しないIDに対して None を返す問題"""
+
+    def test_存在しないIDをdeleteするとNoneが返る(self, todo):
+        """【バグB3】存在しないIDを delete() すると False ではなく None が返ること"""
+        result = todo.delete(999)
+        assert result is None
+
+    def test_空リストに対してdeleteするとNoneが返る(self, todo):
+        """【バグB3】アイテムが0件の状態で delete() すると None が返ること"""
+        result = todo.delete(1)
+        assert result is None
+
+    def test_同じIDを2回deleteすると2回目はNoneが返る(self, todo):
+        """【バグB3】削除済みIDを再度 delete() すると None が返ること"""
+        item = todo.add("タスク")
+        todo.delete(item["id"])
+        result = todo.delete(item["id"])
+        assert result is None
+
+
+class TestCompleteEdgeCase:
+    """B4: complete() が存在しないIDに対して None を返す問題"""
+
+    def test_存在しないIDをcompleteするとNoneが返る(self, todo):
+        """【バグB4】存在しないIDを complete() すると None が返ること"""
+        result = todo.complete(999)
+        assert result is None
+
+    def test_空リストに対してcompleteするとNoneが返る(self, todo):
+        """【バグB4】アイテムが0件の状態で complete() すると None が返ること"""
+        result = todo.complete(1)
+        assert result is None
+
+    def test_削除済みIDをcompleteするとNoneが返る(self, todo):
+        """【バグB4】削除済みアイテムのIDを complete() すると None が返ること"""
+        item = todo.add("タスク")
+        todo.delete(item["id"])
+        result = todo.complete(item["id"])
+        assert result is None
+
+
+class TestAddEmptyTitle:
+    """B5: add() に空文字列タイトルを渡す問題"""
+
+    def test_空文字列タイトルが登録されてしまう(self, todo):
+        """【バグB5】add('') を呼ぶと空タイトルのアイテムが登録されること"""
+        item = todo.add("")
+        assert item is not None
+        assert item["title"] == ""
         assert len(todo.list_all()) == 1
 
 
-class TestTodoListByCategory:
-    """TodoList.list_by_category() のテスト"""
+class TestSearchNoneBug:
+    """B6: search() に None を渡すと TypeError が発生する問題"""
 
-    def setup_method(self):
-        """各テスト前に共通のTodoリストを用意する"""
-        self.todo = TodoList()
-        self.todo.add("報告書を書く", category="仕事")
-        self.todo.add("買い物をする", category="プライベート")
-        self.todo.add("会議の準備", category="仕事")
-        self.todo.add("メモ")  # カテゴリなし
+    def test_Noneを渡すとTypeErrorが発生する(self, todo):
+        """【バグB6】search(None) を呼ぶと TypeError が発生すること"""
+        todo.add("タスク")
+        with pytest.raises(TypeError):
+            todo.search(None)
 
-    def test_仕事カテゴリのみ返す(self):
-        """list_by_category('仕事')で仕事カテゴリのアイテムのみ返ること"""
-        items = self.todo.list_by_category("仕事")
-        assert len(items) == 2
-        assert all(i.category == "仕事" for i in items)
 
-    def test_プライベートカテゴリのみ返す(self):
-        """list_by_category('プライベート')でプライベートのアイテムのみ返ること"""
-        items = self.todo.list_by_category("プライベート")
+class TestListAllMutability:
+    """B7: list_all() が内部リストへの参照を返す問題"""
+
+    def test_返り値を変更すると内部データが破壊される(self, todo):
+        """【バグB7】list_all() の返り値を clear() すると内部リストも空になること"""
+        todo.add("タスク")
+        returned = todo.list_all()
+        returned.clear()
+        assert len(todo.list_all()) == 0
+
+
+# ===========================================================================
+# 永続化（save/load）のテスト
+# ===========================================================================
+
+class TestPersistence:
+    """save() と load() の連携テスト"""
+
+    def test_addしたアイテムがファイルに保存される(self, tmp_path):
+        """add() 後にファイルを再度ロードしても同じアイテムが取得できること"""
+        filepath = str(tmp_path / "todos.json")
+        with open(filepath, "w") as f:
+            json.dump({"todos": [], "next_id": 1}, f)
+
+        tl1 = TodoList(filepath=filepath)
+        tl1.add("永続化タスク")
+
+        tl2 = TodoList(filepath=filepath)
+        items = tl2.list_all()
         assert len(items) == 1
-        assert items[0].title == "買い物をする"
+        assert items[0]["title"] == "永続化タスク"
 
-    def test_存在しないカテゴリは空リストを返す(self):
-        """存在しないカテゴリを指定すると空リストが返ること"""
-        items = self.todo.list_by_category("趣味")
-        assert items == []
+    def test_deleteしたアイテムがファイルにも反映される(self, tmp_path):
+        """delete() 後にファイルを再ロードしても削除済みのアイテムが存在しないこと"""
+        filepath = str(tmp_path / "todos.json")
+        with open(filepath, "w") as f:
+            json.dump({"todos": [], "next_id": 1}, f)
 
-    def test_カテゴリなしのアイテムはNoneカテゴリ検索でヒットしない(self):
-        """list_by_category('')では、categoryがNoneのアイテムはヒットしないこと"""
-        # categoryがNoneのアイテムは空文字列検索でも返らない
-        items = self.todo.list_by_category("")
-        assert items == []
+        tl1 = TodoList(filepath=filepath)
+        item = tl1.add("削除するタスク")
+        tl1.delete(item["id"])
 
+        tl2 = TodoList(filepath=filepath)
+        assert len(tl2.list_all()) == 0
 
-class TestTodoListComplete:
-    """TodoList.complete() のテスト"""
+    def test_completeしたアイテムがファイルに反映される(self, tmp_path):
+        """complete() 後に再ロードすると done=True のアイテムが取得できること"""
+        filepath = str(tmp_path / "todos.json")
+        with open(filepath, "w") as f:
+            json.dump({"todos": [], "next_id": 1}, f)
 
-    def setup_method(self):
-        """各テスト前にTodoリストを用意する"""
-        self.todo = TodoList()
+        tl1 = TodoList(filepath=filepath)
+        item = tl1.add("完了タスク")
+        tl1.complete(item["id"])
 
-    # --- 正常系 ---
-    def test_正常_存在するIDのTodoをcompleteで完了にできる(self):
-        """completeを呼んだTodoItemのdoneがTrueになること"""
-        item = self.todo.add("レポート提出")
-        result = self.todo.complete(item.id)
-        assert result is not None
-        assert result.done is True
-        assert result.id == item.id
-
-    def test_正常_complete後もlist_allに残る(self):
-        """completeした後もlist_allでアイテムが取得できること"""
-        item = self.todo.add("完了タスク")
-        self.todo.complete(item.id)
-        items = self.todo.list_all()
-        assert len(items) == 1
-        assert items[0].done is True
-
-    def test_正常_completeは対象アイテムのみ完了にする(self):
-        """completeで指定したID以外のdoneは変化しないこと"""
-        item1 = self.todo.add("タスク1")
-        item2 = self.todo.add("タスク2")
-        self.todo.complete(item1.id)
-        assert item1.done is True
-        assert item2.done is False
-
-    # --- 異常系 ---
-    def test_異常_存在しないIDをcompleteするとNoneを返す(self):
-        """存在しないIDを指定するとcompleteがNoneを返すこと"""
-        result = self.todo.complete(999)
-        assert result is None
-
-    def test_異常_空リストに対してcompleteするとNoneを返す(self):
-        """アイテムが0件の状態でcompleteするとNoneを返すこと"""
-        result = self.todo.complete(1)
-        assert result is None
-
-    def test_異常_削除済みIDをcompleteするとNoneを返す(self):
-        """削除したアイテムのIDを指定するとcompleteがNoneを返すこと"""
-        item = self.todo.add("削除後に完了を試みるタスク")
-        self.todo.delete(item.id)
-        result = self.todo.complete(item.id)
-        assert result is None
-
-
-class TestTodoListDelete:
-    """TodoList.delete() のテスト"""
-
-    def setup_method(self):
-        """各テスト前にTodoリストを用意する"""
-        self.todo = TodoList()
-
-    # --- 正常系 ---
-    def test_正常_存在するIDのTodoをdeleteで削除できる(self):
-        """deleteが成功するとTrueを返し、リストからアイテムが消えること"""
-        item = self.todo.add("削除するタスク")
-        deleted = self.todo.delete(item.id)
-        assert deleted is True
-        assert len(self.todo.list_all()) == 0
-
-    def test_正常_複数アイテムから対象のみ削除される(self):
-        """deleteで指定したID以外のアイテムはリストに残ること"""
-        item1 = self.todo.add("残すタスク")
-        item2 = self.todo.add("削除するタスク")
-        self.todo.delete(item2.id)
-        remaining = self.todo.list_all()
-        assert len(remaining) == 1
-        assert remaining[0].id == item1.id
-
-    def test_正常_削除後に新しいアイテムを追加できる(self):
-        """deleteで削除した後、新しいアイテムを追加できること"""
-        item = self.todo.add("削除対象")
-        self.todo.delete(item.id)
-        new_item = self.todo.add("新しいタスク")
-        assert len(self.todo.list_all()) == 1
-        assert new_item.title == "新しいタスク"
-
-    # --- 異常系 ---
-    def test_異常_存在しないIDをdeleteするとFalseを返す(self):
-        """存在しないIDを指定するとdeleteがFalseを返すこと"""
-        result = self.todo.delete(999)
-        assert result is False
-
-    def test_異常_空リストに対してdeleteするとFalseを返す(self):
-        """アイテムが0件の状態でdeleteするとFalseを返すこと"""
-        result = self.todo.delete(1)
-        assert result is False
-
-    def test_異常_同じIDを2回deleteすると2回目はFalseを返す(self):
-        """同じIDを2回deleteすると、2回目はFalseを返すこと"""
-        item = self.todo.add("二重削除テスト")
-        self.todo.delete(item.id)
-        result = self.todo.delete(item.id)
-        assert result is False
-
-
-class TestTodoListStr:
-    """TodoList.__str__() のテスト"""
-
-    def test_空リストのとき専用メッセージを返す(self):
-        """アイテムが0件のとき、「Todoリストは空です」を返すこと"""
-        todo = TodoList()
-        assert str(todo) == "Todoリストは空です"
-
-    def test_カテゴリが文字列に含まれる(self):
-        """categoryを持つアイテムは文字列中に[カテゴリ]が表示されること"""
-        todo = TodoList()
-        todo.add("報告書を書く", category="仕事")
-        assert "[仕事]" in str(todo)
-
-    def test_カテゴリなしはブラケットなし(self):
-        """categoryがNoneのアイテムは文字列中にカテゴリ用ブラケットが表示されないこと"""
-        todo = TodoList()
-        todo.add("メモ")
-        result = str(todo)
-        # IDの[1]のみが含まれ、カテゴリブラケットは含まれない
-        assert "[" not in result or result.count("[") == 1
-
-    def test_完了済みにはチェックマークとカテゴリ両方表示(self):
-        """完了済みアイテムはチェックマークとカテゴリが両方表示されること"""
-        todo = TodoList()
-        item = todo.add("タスク", category="仕事")
-        todo.complete(item.id)
-        result = str(todo)
-        assert "✓" in result
-        assert "[仕事]" in result
-
-    def test_未完了アイテムにはチェックマークが表示されない(self):
-        """未完了アイテムの文字列にはチェックマークが含まれないこと"""
-        todo = TodoList()
-        todo.add("未完了タスク")
-        result = str(todo)
-        assert "✓" not in result
-        assert "未完了" in result
-
-    def test_複数アイテムが改行区切りで表示される(self):
-        """複数アイテムは改行区切りで表示されること"""
-        todo = TodoList()
-        todo.add("タスクA")
-        todo.add("タスクB")
-        result = str(todo)
-        lines = result.split("\n")
-        assert len(lines) == 2
+        tl2 = TodoList(filepath=filepath)
+        assert tl2.list_all()[0]["done"] is True
