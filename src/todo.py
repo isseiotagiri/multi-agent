@@ -1,267 +1,351 @@
-import json
+"""Todoリストを管理するモジュール。
+
+このモジュールは、シンプルなTodoリストの作成・取得・更新・削除（CRUD）機能を提供する。
+
+提供するクラス:
+    TodoItem: 1件のTodoアイテムを表す不変データクラス。
+    AlreadyDoneError: 既完了のTodoに対して complete を呼んだ場合に送出される例外。
+    TodoList: Todoアイテムを管理するクラス。追加・取得・完了・削除の操作をサポートする。
+"""
+
+from dataclasses import dataclass, replace
+
+
+@dataclass(frozen=True)
+class TodoItem:
+    """1件のTodoアイテムを表す不変データクラス。
+
+    ``frozen=True`` により、インスタンス生成後に属性を直接変更することはできない。
+    完了状態の更新など値を変える場合は ``dataclasses.replace`` を使って新しい
+    インスタンスを生成する。
+
+    Attributes:
+        id: アイテムを一意に識別する正の整数。``TodoList`` が自動で採番する。
+        title: タスクの内容を表す文字列。前後の空白はトリム済みで保存される。
+            空文字または200文字超は許可されない。
+        done: 完了フラグ。``True`` のとき完了済み。デフォルトは ``False``。
+        category: タスクのカテゴリを表す任意の文字列。
+            未設定の場合または空白文字列が渡された場合は ``None``。
+
+    Example:
+        >>> item = TodoItem(id=1, title="牛乳を買う")
+        >>> item.id
+        1
+        >>> item.done
+        False
+        >>> item.category is None
+        True
+    """
+
+    id: int
+    title: str
+    done: bool = False
+    category: str | None = None
+
+
+class AlreadyDoneError(Exception):
+    """既に完了済みのTodoに対して complete を呼んだ場合に送出される例外。
+
+    ``Exception`` のサブクラスとして定義されており、
+    ``TodoList.complete`` 内で ``done=True`` のアイテムへの再完了操作を検知した際に
+    送出される。
+
+    Example:
+        >>> todo_list = TodoList()
+        >>> item = todo_list.add("テストタスク")
+        >>> todo_list.complete(item.id)  # 1回目は成功
+        TodoItem(...)
+        >>> todo_list.complete(item.id)  # 2回目は AlreadyDoneError
+        Traceback (most recent call last):
+            ...
+        AlreadyDoneError: ID 1 のTodoは既に完了しています
+    """
 
 
 class TodoList:
-    """JSONファイルを永続化ストアとして使うTodoリスト管理クラス。
+    """Todoアイテムを管理するクラス。
 
-    インスタンス生成時に指定されたJSONファイルを読み込み、
-    アイテムの追加・完了・削除・検索・統計取得を行う。
-    各操作後は自動的にファイルへ保存される。
-
-    JSONファイルのデータ形式::
-
-        {
-            "todos": [
-                {"id": 1, "title": "タスク名", "done": false}
-            ],
-            "next_id": 2
-        }
-
-    Args:
-        filepath (str): Todoデータを保存するJSONファイルのパス。
-            デフォルトは ``"todos.json"``。
+    内部ストレージとして ``dict[int, TodoItem]`` を使用することで、
+    IDによる検索・削除を O(1) で行う。IDは追加のたびに自動採番される（1から連番）。
 
     Attributes:
-        filepath (str): JSONファイルのパス。
-        todos (list[dict]): Todoアイテムのリスト。
-        next_id (int): 次に割り当てるID。
+        MAX_TITLE_LENGTH (int): タイトルの最大文字数。200文字固定。
 
     Example:
-        >>> import json, tempfile, os
-        >>> with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-        ...     json.dump({"todos": [], "next_id": 1}, f)
-        ...     path = f.name
-        >>> tl = TodoList(filepath=path)
-        >>> item = tl.add("はじめてのタスク")
-        >>> item["title"]
-        'はじめてのタスク'
-        >>> os.unlink(path)
+        >>> tl = TodoList()
+
+        # アイテムの追加
+        >>> item = tl.add("買い物をする", category="家事")
+        >>> item.id
+        1
+        >>> item.title
+        '買い物をする'
+        >>> item.category
+        '家事'
+
+        # 一覧取得
+        >>> tl.add("レポートを書く", category="仕事")
+        TodoItem(id=2, title='レポートを書く', done=False, category='仕事')
+        >>> all_items = tl.list_all()
+        >>> len(all_items)
+        2
+
+        # カテゴリフィルタ
+        >>> 家事リスト = tl.list_by_category("家事")
+        >>> len(家事リスト)
+        1
+
+        # 完了にする
+        >>> done_item = tl.complete(1)
+        >>> done_item.done
+        True
+
+        # 削除する
+        >>> tl.delete(2)
+        True
+        >>> len(tl.list_all())
+        1
+
+        # 文字列表現
+        >>> print(tl)
+        ✓ [1] 買い物をする [家事] (完了)
     """
 
-    def __init__(self, filepath="todos.json"):
-        self.filepath = filepath
-        self.todos = []
-        self.next_id = 1
-        self.load()
+    MAX_TITLE_LENGTH = 200
 
-    def load(self):
-        """JSONファイルからTodoデータを読み込む。
+    def __init__(self) -> None:
+        """TodoList を初期化する。
 
-        ``self.filepath`` が指すJSONファイルを開き、
-        ``todos`` リストと ``next_id`` を初期化する。
-        このメソッドは ``__init__`` から自動的に呼ばれる。
-
-        Raises:
-            FileNotFoundError: 指定したファイルが存在しない場合。
-            json.JSONDecodeError: ファイルの内容が不正なJSON形式の場合。
-            KeyError: JSONに ``"todos"`` または ``"next_id"`` キーがない場合。
-
-        Note:
-            【バグB1】ファイルが存在しない場合に ``FileNotFoundError`` が発生する。
-            ファイルが存在しないときは空のTodoリストで初期化するよう修正が必要。
+        内部ストレージ（空の辞書）と次に使うIDカウンタを初期化する。
         """
-        f = open(self.filepath, "r")
-        data = json.load(f)
-        self.todos = data["todos"]
-        self.next_id = data["next_id"]
-        f.close()
+        self._items: dict[int, TodoItem] = {}
+        self._next_id: int = 1
 
-    def save(self):
-        """現在のTodoデータをJSONファイルへ書き込む。
+    def add(self, title: str, category: str | None = None) -> TodoItem:
+        """Todoアイテムを追加して返す。
 
-        ``self.todos`` と ``self.next_id`` を ``self.filepath`` へ
-        JSON形式で上書き保存する。
-        ``add()`` / ``complete()`` / ``delete()`` から自動的に呼ばれる。
-
-        Raises:
-            OSError: ファイルへの書き込みに失敗した場合（権限不足など）。
-
-        Example:
-            >>> # save() は各変更メソッドから自動的に呼ばれるため、
-            >>> # 通常は直接呼び出す必要はない。
-            >>> tl.save()  # 明示的に保存したい場合のみ使用する
-        """
-        f = open(self.filepath, "w")
-        json.dump({"todos": self.todos, "next_id": self.next_id}, f)
-        f.close()
-
-    def add(self, title):
-        """新しいTodoアイテムを追加する。
-
-        指定したタイトルでアイテムを作成し、IDを採番してリストへ追加する。
-        追加後は自動的にファイルへ保存する。
+        タイトルは前後の空白がトリムされて保存される。
+        カテゴリも同様にトリムされ、空白文字列のみの場合は ``None`` として扱われる。
 
         Args:
-            title (str): Todoアイテムのタイトル。
+            title: タスクのタイトル。前後の空白はトリムされる。
+                空文字または空白のみは不可。トリム後200文字以内であること。
+            category: タスクのカテゴリ（省略可）。前後の空白はトリムされる。
+                空白のみの文字列を渡した場合は ``None`` として保存される。
 
         Returns:
-            dict: 追加したTodoアイテム。キーは ``"id"``（int）、
-                ``"title"``（str）、``"done"``（bool）。
+            新しく生成された ``TodoItem``。IDは1から始まる連番が自動で設定される。
 
-        Note:
-            【バグB5】空文字列 ``""`` を ``title`` に渡してもバリデーションなしに
-            登録されてしまう。空文字列は拒否するよう修正が必要。
+        Raises:
+            ValueError: ``title`` が空文字・空白のみ、またはトリム後に
+                ``MAX_TITLE_LENGTH``（200文字）を超える場合。
 
         Example:
-            >>> item = tl.add("買い物をする")
-            >>> item
-            {'id': 1, 'title': '買い物をする', 'done': False}
+            >>> tl = TodoList()
+            >>> item = tl.add("牛乳を買う")
+            >>> item.title
+            '牛乳を買う'
+            >>> item.id
+            1
+
+            # カテゴリ付きで追加
+            >>> item2 = tl.add("  掃除機をかける  ", category="家事")
+            >>> item2.title  # 前後の空白がトリムされる
+            '掃除機をかける'
+            >>> item2.category
+            '家事'
+
+            # 空白のみのカテゴリは None になる
+            >>> item3 = tl.add("散歩する", category="   ")
+            >>> item3.category is None
+            True
         """
-        todo = {"id": self.next_id, "title": title, "done": False}
-        self.todos.append(todo)
-        self.next_id += 1
-        self.save()
-        return todo
+        stripped = title.strip()
+        if not stripped:
+            raise ValueError("タイトルは空にできません")
+        if len(stripped) > self.MAX_TITLE_LENGTH:
+            raise ValueError(f"タイトルは{self.MAX_TITLE_LENGTH}文字以内にしてください")
 
-    def list_all(self):
-        """全てのTodoアイテムを取得する。
+        # カテゴリをトリムし、空白のみの場合は None に変換する
+        cat = category.strip() if category is not None else None
+        if cat == "":
+            cat = None
 
-        内部リストをそのまま返す。追加順（IDの昇順）で返される。
+        item = TodoItem(id=self._next_id, title=stripped, category=cat)
+        self._items[self._next_id] = item
+        self._next_id += 1
+        return item
+
+    def list_all(self) -> list[TodoItem]:
+        """全Todoアイテムをリストで返す。
+
+        返却されるリストは内部辞書のコピーであるため、
+        リスト自体を変更しても内部状態には影響しない。
+        ただし各 ``TodoItem`` は ``frozen=True`` の不変オブジェクトである。
 
         Returns:
-            list[dict]: 全Todoアイテムのリスト。
-                アイテムが0件の場合は空リスト ``[]`` を返す。
-
-        Note:
-            【バグB7】内部リスト自体への参照を返すため、呼び出し元が返り値を
-            変更（例: ``clear()`` や ``pop()``）すると内部データが破壊される。
-            ``return list(self.todos)`` のようにコピーを返すよう修正が必要。
+            全 ``TodoItem`` を追加順に格納したリスト。
+            アイテムが存在しない場合は空リストを返す。
 
         Example:
-            >>> tl.add("タスク1")
-            >>> tl.add("タスク2")
-            >>> items = tl.list_all()
-            >>> len(items)
+            >>> tl = TodoList()
+            >>> tl.list_all()
+            []
+            >>> tl.add("タスクA")
+            TodoItem(id=1, title='タスクA', done=False, category=None)
+            >>> tl.add("タスクB")
+            TodoItem(id=2, title='タスクB', done=False, category=None)
+            >>> len(tl.list_all())
             2
         """
-        return self.todos
+        return list(self._items.values())
 
-    def complete(self, todo_id):
-        """指定IDのTodoアイテムを完了状態にする。
-
-        ``todo_id`` に一致するアイテムを検索し、``done`` を ``True`` に更新する。
-        更新後は自動的にファイルへ保存する。
+    def list_by_category(self, category: str) -> list[TodoItem]:
+        """指定したカテゴリのTodoアイテムのみをリストで返す。
 
         Args:
-            todo_id (int): 完了にするTodoアイテムのID。
+            category: フィルタするカテゴリ文字列。完全一致で検索する。
 
         Returns:
-            dict | None: 完了状態に更新したアイテム。
-                IDが見つからない場合は ``None`` を返す。
-
-        Note:
-            【バグB4】IDが見つからない場合に明示的な ``return False`` や
-            例外がなく、暗黙的に ``None`` が返る。
-            呼び出し元は戻り値が ``None`` かどうかを確認して処理する必要がある。
+            指定カテゴリに一致する ``TodoItem`` のリスト。
+            一致するアイテムが存在しない場合は空リストを返す。
 
         Example:
-            >>> item = tl.add("レポートを提出する")
-            >>> result = tl.complete(item["id"])
-            >>> result["done"]
-            True
-            >>> tl.complete(999)  # 存在しないID -> None が返る
-        """
-        for todo in self.todos:
-            if todo["id"] == todo_id:
-                todo["done"] = True
-                self.save()
-                return todo
-
-    def delete(self, todo_id):
-        """指定IDのTodoアイテムを削除する。
-
-        ``todo_id`` に一致するアイテムをリストから取り除く。
-        削除後は自動的にファイルへ保存する。
-
-        Args:
-            todo_id (int): 削除するTodoアイテムのID。
-
-        Returns:
-            bool | None: 削除に成功した場合は ``True``。
-                IDが見つからない場合は ``None`` を返す（``False`` ではない）。
-
-        Note:
-            【バグB3】IDが見つからない場合に ``False`` ではなく ``None`` が返る。
-            呼び出し元で ``result is False`` と判定しても正しく動作しないため、
-            ``result is None`` または ``not result`` で判定する必要がある。
-
-        Example:
-            >>> item = tl.add("不要なタスク")
-            >>> tl.delete(item["id"])
-            True
-            >>> tl.delete(999)  # 存在しないID -> None が返る
-        """
-        for i, todo in enumerate(self.todos):
-            if todo["id"] == todo_id:
-                self.todos.pop(i)
-                self.save()
-                return True
-
-    def search(self, keyword):
-        """キーワードでTodoアイテムを検索する。
-
-        タイトルに ``keyword`` を含む全アイテムを返す（部分一致）。
-        大文字・小文字は区別される。
-
-        Args:
-            keyword (str): 検索キーワード。空文字列 ``""`` を渡すと全件返る。
-
-        Returns:
-            list[dict]: キーワードにマッチしたTodoアイテムのリスト。
-                マッチするアイテムがない場合は空リスト ``[]`` を返す。
-
-        Raises:
-            TypeError: ``keyword`` に ``None`` を渡した場合（``in`` 演算子が失敗する）。
-
-        Note:
-            【バグB6】``keyword`` に ``None`` を渡すと ``TypeError`` が発生する。
-            引数の型チェックを追加するか、呼び出し元で ``None`` を渡さないよう注意する。
-
-        Example:
-            >>> tl.add("買い物リストを作る")
-            >>> tl.add("報告書を書く")
-            >>> tl.search("書")
-            [{'id': 1, 'title': '買い物リストを作る', 'done': False},
-             {'id': 2, 'title': '報告書を書く', 'done': False}]
-            >>> tl.search("存在しないワード")
+            >>> tl = TodoList()
+            >>> tl.add("仕事A", category="仕事")
+            TodoItem(...)
+            >>> tl.add("趣味A", category="趣味")
+            TodoItem(...)
+            >>> 仕事リスト = tl.list_by_category("仕事")
+            >>> len(仕事リスト)
+            1
+            >>> tl.list_by_category("存在しないカテゴリ")
             []
         """
-        result = []
-        for todo in self.todos:
-            if keyword in todo["title"]:
-                result.append(todo)
-        return result
+        return [item for item in self._items.values() if item.category == category]
 
-    def get_stats(self):
-        """Todoリストの統計情報を取得する。
+    def complete(self, todo_id: int) -> TodoItem:
+        """指定IDのTodoアイテムを完了状態にして返す。
 
-        全件数・完了件数・未完了件数・完了率を計算して返す。
+        ``TodoItem`` は不変（``frozen=True``）のため、内部では ``dataclasses.replace``
+        を用いて ``done=True`` の新しいインスタンスを生成し、内部ストレージを更新する。
+
+        Args:
+            todo_id: 完了にするTodoアイテムのID。
 
         Returns:
-            dict: 統計情報を格納した辞書。キーと値は以下の通り:
-
-                - ``"total"`` (int): 全アイテム数。
-                - ``"done"`` (int): 完了済みアイテム数。
-                - ``"pending"`` (int): 未完了アイテム数。
-                - ``"rate"`` (float): 完了率（``done / total``）。
+            ``done=True`` に更新された新しい ``TodoItem`` インスタンス。
+            ID・タイトル・カテゴリは変更されない。
 
         Raises:
-            ZeroDivisionError: アイテムが0件のとき ``done / total`` の計算で発生する。
-
-        Note:
-            【バグB2】アイテムが0件のとき ``ZeroDivisionError`` が発生する。
-            ``total == 0`` のときは ``rate`` を ``0.0`` として返すよう修正が必要。
+            KeyError: 指定した ``todo_id`` に対応するTodoが存在しない場合。
+            AlreadyDoneError: 指定した ``todo_id`` のTodoが既に完了済み（``done=True``）の場合。
 
         Example:
-            >>> tl.add("タスク1")
-            >>> item = tl.add("タスク2")
-            >>> tl.complete(item["id"])
-            >>> tl.get_stats()
-            {'total': 2, 'done': 1, 'pending': 1, 'rate': 0.5}
+            >>> tl = TodoList()
+            >>> item = tl.add("完了するタスク")
+            >>> item.done
+            False
+            >>> done_item = tl.complete(item.id)
+            >>> done_item.done
+            True
+
+            # 存在しないIDには KeyError
+            >>> tl.complete(999)
+            Traceback (most recent call last):
+                ...
+            KeyError: 'ID 999 のTodoが見つかりません'
+
+            # 既完了のアイテムには AlreadyDoneError
+            >>> tl.complete(item.id)
+            Traceback (most recent call last):
+                ...
+            AlreadyDoneError: ID 1 のTodoは既に完了しています
         """
-        total = len(self.todos)
-        done = 0
-        for todo in self.todos:
-            if todo["done"]:
-                done += 1
-        return {"total": total, "done": done, "pending": total - done, "rate": done / total}
+        item = self._find(todo_id)
+        if item is None:
+            raise KeyError(f"ID {todo_id} のTodoが見つかりません")
+        if item.done:
+            raise AlreadyDoneError(f"ID {todo_id} のTodoは既に完了しています")
+        updated = replace(item, done=True)
+        self._items[todo_id] = updated
+        return updated
+
+    def delete(self, todo_id: int) -> bool:
+        """指定IDのTodoアイテムを削除する。
+
+        指定したIDのアイテムが存在しない場合は何もせず ``False`` を返す。
+        例外は送出しない。
+
+        Args:
+            todo_id: 削除するTodoアイテムのID。
+
+        Returns:
+            削除に成功した場合は ``True``、指定IDのアイテムが存在しない場合は ``False``。
+
+        Example:
+            >>> tl = TodoList()
+            >>> item = tl.add("削除対象タスク")
+            >>> tl.delete(item.id)
+            True
+            >>> tl.list_all()
+            []
+
+            # 存在しないIDは False
+            >>> tl.delete(999)
+            False
+        """
+        if todo_id not in self._items:
+            return False
+        del self._items[todo_id]
+        return True
+
+    def __str__(self) -> str:
+        """TodoListの内容を人間が読みやすい文字列で返す。
+
+        各アイテムを1行で表現し、改行で結合して返す。
+        1行のフォーマットは以下の通り:
+
+        - 完了済み: ``✓ [ID] タイトル [カテゴリ] (完了)``
+        - 未完了:   ``  [ID] タイトル [カテゴリ] (未完了)``
+        - カテゴリが ``None`` の場合は ``[カテゴリ]`` 部分は省略される。
+
+        Returns:
+            アイテムが存在する場合は各アイテムを改行で連結した文字列。
+            アイテムが存在しない場合は ``"Todoリストは空です"``。
+
+        Example:
+            >>> tl = TodoList()
+            >>> print(tl)
+            Todoリストは空です
+            >>> tl.add("買い物", category="家事")
+            TodoItem(...)
+            >>> item = tl.add("レポート提出")
+            >>> tl.complete(item.id)
+            TodoItem(...)
+            >>> print(tl)
+              [1] 買い物 [家事] (未完了)
+            ✓ [2] レポート提出 (完了)
+        """
+        if not self._items:
+            return "Todoリストは空です"
+
+        def _line(item: TodoItem) -> str:
+            """1件のTodoアイテムを1行の文字列に変換する内部ヘルパー。"""
+            mark = "✓ " if item.done else "  "
+            cat = f" [{item.category}]" if item.category else ""
+            status = "完了" if item.done else "未完了"
+            return f"{mark}[{item.id}] {item.title}{cat} ({status})"
+
+        return "\n".join(_line(i) for i in self._items.values())
+
+    def _find(self, todo_id: int) -> TodoItem | None:
+        """指定IDのTodoアイテムを返す内部ヘルパー。
+
+        Args:
+            todo_id: 検索するTodoアイテムのID。
+
+        Returns:
+            該当する ``TodoItem``。存在しない場合は ``None``。
+        """
+        return self._items.get(todo_id)
